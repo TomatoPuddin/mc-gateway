@@ -7,6 +7,9 @@ import (
 	"net"
 	"os"
 	"sync"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/rs/zerolog/log"
 )
 
 type Config struct {
@@ -32,10 +35,35 @@ func loadConfig() error {
 	return json.Unmarshal(byteValue, &config)
 }
 
+func watchConfig() *fsnotify.Watcher {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to create config watcher")
+	}
+	go func() {
+		for {
+			_, ok := <-watcher.Events
+			if !ok {
+				return
+			}
+			loadConfig()
+		}
+	}()
+	err = watcher.Add("config.json")
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to watch config file")
+	}
+
+	return watcher
+}
+
 func main() {
 	if err := loadConfig(); err != nil {
 		panic(err)
 	}
+
+	watcher := watchConfig()
+	defer watcher.Close()
 
 	// 监听TCP端口
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", config.Port))
@@ -43,13 +71,15 @@ func main() {
 		panic(err)
 	}
 	defer listener.Close()
-	fmt.Println("Listening on :25565")
+	log.Info().
+		Int("port", config.Port).
+		Msg("Listening")
 
 	for {
 		// 接受传入的连接
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Error accepting:", err.Error())
+			log.Err(err).Msg("Error accepting")
 			continue
 		}
 		// 处理连接
@@ -64,7 +94,7 @@ func handleRequest(conn net.Conn) {
 	buf := make([]byte, 1024)
 	n, err := conn.Read(buf)
 	if err != nil {
-		fmt.Println("Error reading:", err.Error())
+		log.Err(err).Msg("Error reading hostname")
 		return
 	}
 	mc_host := GetMcHost(buf[:n])
@@ -75,7 +105,7 @@ func handleRequest(conn net.Conn) {
 
 	client, err := net.Dial("tcp", host)
 	if err != nil {
-		fmt.Println("Error dialing:", err.Error())
+		log.Err(err).Msg("Error dialing")
 		return
 	}
 	defer client.Close()

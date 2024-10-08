@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/rs/zerolog/log"
@@ -36,20 +37,42 @@ func loadConfig() error {
 }
 
 func watchConfig() *fsnotify.Watcher {
+	go func() {
+		for {
+			time.Sleep(time.Minute)
+			if err := loadConfig(); err != nil {
+				log.Error().Err(err).Msg("Failed to reload config")
+			}
+		}
+	}()
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create config watcher")
 	}
 	go func() {
 		for {
-			_, ok := <-watcher.Events
-			if !ok {
-				return
+			select {
+			case _, ok := <-watcher.Events:
+				if !ok {
+					log.Error().Msg("watcher.Events channel closed")
+					return
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					log.Error().Msg("watcher.Errors channel closed")
+					return
+				}
+				log.Error().Err(err).Msg("watcher error")
 			}
-			loadConfig()
+
+			log.Info().Msg("reload config")
+			if err := loadConfig(); err != nil {
+				log.Error().Err(err).Msg("Failed to reload config")
+			}
 		}
 	}()
-	err = watcher.Add("config.json")
+	err = watcher.Add(".")
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to watch config file")
 	}
@@ -88,6 +111,19 @@ func main() {
 }
 
 func handleRequest(conn net.Conn) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+
+		if err, ok := rec.(error); ok {
+			log.Err(err).Msg("Panic on handle request")
+		} else {
+			log.Error().Any("err", rec).Msg("Panic on handle request")
+		}
+	}()
+
 	// 确保连接关闭
 	defer conn.Close()
 
@@ -102,6 +138,11 @@ func handleRequest(conn net.Conn) {
 	if !ok {
 		host = config.Default
 	}
+
+	log.Info().
+		Str("client", conn.RemoteAddr().String()).
+		Str("mc", host).
+		Msg("map to host")
 
 	client, err := net.Dial("tcp", host)
 	if err != nil {
@@ -160,6 +201,10 @@ func handleWrite(srv, cli net.Conn, wg *sync.WaitGroup) {
 }
 
 func GetMcHost(buf []byte) string {
+	if len(buf) < 5 {
+		return ""
+	}
+
 	buf = buf[4:]
 	host_len := buf[0]
 	if len(buf)+1 < int(host_len) {
